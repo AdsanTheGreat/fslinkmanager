@@ -11,10 +11,15 @@ fn main() -> std::io::Result<()> {
 
 
 enum QuickLinkCreationError {
-    SourceDoesNotExist(String), // source
-    TargetExists(String, String), // source, target
-    TargetLinkHasDifferentSource(String, String, String), // source, target, target's source
-    UnavailableLinkType(String, LinkType, FileType), // source, linktype, targettype
+    /// Format: source
+    SourceDoesNotExist(String), 
+    /// Format: source, target
+    TargetExists(String, String),
+    /// Format: source, target, target's source
+    TargetLinkHasDifferentSource(String, String, String), 
+    /// Format: source, linktype, targettype
+    UnavailableLinkType(String, LinkType, FileType), 
+    /// Format: io_error
     LinkIOError(io::Error)
 }
 
@@ -83,6 +88,8 @@ impl Display for FileType {
 
 
 #[derive(Serialize, Deserialize)]
+/// A soft/hard link wrapper, that remembers what it is.
+/// Can be not present in the filesystem.
 struct QuickLink {
     source: String,
     target: String,
@@ -91,6 +98,8 @@ struct QuickLink {
 }
 
 impl QuickLink {
+    /// Create a new QuickLink object, without linking it.
+    /// Supports importing an existing softlink, provided the target file is already one pointing exactly to the source.
     pub fn new(source: &str, target: &str, linktype: LinkType) -> Result<QuickLink, QuickLinkCreationError> {
         let source_file = Path::new(source);
         if !source_file.exists() {
@@ -118,7 +127,9 @@ impl QuickLink {
         }
         Ok(QuickLink { source: source.to_owned(), target: target.to_owned(), exists: exists, linktype: linktype })
     }
-
+    
+    /// Create a new QuickLink object, without linking it.
+    /// Supports importing an existing softlink, provided the target file is already one pointing exactly to the source.
     pub fn new_autolink(source: &str, target: &str, linktype: LinkType) -> Result<QuickLink, QuickLinkCreationError> {
         let source_file = Path::new(source);
         if !source_file.exists() {
