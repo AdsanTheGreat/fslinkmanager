@@ -1,10 +1,25 @@
-use std::{error::Error, fmt::{self, Debug, Display, Formatter}, io, os::unix::fs, path::Path};
+#![feature(file_buffered)]
+
+mod database;
+
+use std::{env, error::Error, fmt::{self, Debug, Display, Formatter}, io, os::unix::fs, path::{Path, PathBuf}, str::FromStr};
 use std::fs::read_link;
 use serde::{Deserialize, Serialize};
 
+use crate::database::LinkStorage;
+
 fn main() -> std::io::Result<()> {
-    let mut link: QuickLink = QuickLink::new("target", "target2", LinkType::Softlink).unwrap();
+    // Quick tests in tmp
+    let db = LinkStorage::init(&env::current_dir().unwrap().join(Path::new("tmp")));
+    let mut link: QuickLink = QuickLink::new(Path::new("./tmp/file1"), Path::new("./tmp/link1"), LinkType::Softlink).unwrap();
+    let mut link2: QuickLink = QuickLink::new_autolink(Path::new("./tmp/file2"), Path::new("./tmp/link2"), LinkType::Softlink).unwrap();
     link.toggle_link()?;
+    link2.toggle_link()?;
+    println!("{}", link);
+    println!("{}", link2);
+    db.save_quicklink(&link);
+    db.save_quicklink(&link2);
+    println!("loaded: {}", db.get_quicklink("file1").unwrap());
     
     Ok(())
 }
@@ -91,8 +106,8 @@ impl Display for FileType {
 /// A soft/hard link wrapper, that remembers what it is.
 /// Can be not present in the filesystem.
 struct QuickLink {
-    source: String,
-    target: String,
+    source: PathBuf,
+    target: PathBuf,
     exists: bool,
     linktype: LinkType,
 }
@@ -100,64 +115,36 @@ struct QuickLink {
 impl QuickLink {
     /// Create a new QuickLink object, without linking it.
     /// Supports importing an existing softlink, provided the target file is already one pointing exactly to the source.
-    pub fn new(source: &str, target: &str, linktype: LinkType) -> Result<QuickLink, QuickLinkCreationError> {
-        let source_file = Path::new(source);
-        if !source_file.exists() {
-            return Err(QuickLinkCreationError::SourceDoesNotExist(source.to_owned()));
+    pub fn new(source: &Path, target: &Path, linktype: LinkType) -> Result<QuickLink, QuickLinkCreationError> {
+        if !source.exists() {
+            return Err(QuickLinkCreationError::SourceDoesNotExist(source.to_string_lossy().into_owned()));
         }
-        let target_file = Path::new(target);
         let mut exists = false;
-        if target_file.exists() { // Check if it is a link, if it has correct type, abort if it is
-            if linktype == LinkType::Softlink && target_file.is_symlink() {
-                if read_link(target).unwrap().as_path() != source_file { // softlink exists, but source is different.
-                    return Err(QuickLinkCreationError::TargetLinkHasDifferentSource(source.to_owned(), target.to_owned(), read_link(target).unwrap().as_path().to_string_lossy().to_string()))
-                } else {
-                    exists = true;
+        if target.exists() { // Check if it is a link, if it has correct type, abort if it is
+            exists = true;
+            if linktype == LinkType::Softlink && target.is_symlink() {
+                if read_link(target).unwrap().as_path() != source.canonicalize().unwrap() { // softlink exists, but source is different.
+                    return Err(QuickLinkCreationError::TargetLinkHasDifferentSource(source.to_string_lossy().into_owned(), target.to_string_lossy().into_owned(), read_link(target).unwrap().as_path().to_string_lossy().to_string()))
                 }
             }
             else if linktype == LinkType::Hardlink {
                 // There might be a way to do it later, for now - always abort, as if it was just a file.
             }
             else {
-                return Err(QuickLinkCreationError::TargetExists(source.to_owned(), target.to_owned())); // target is just a file/directory
+                return Err(QuickLinkCreationError::TargetExists(source.to_string_lossy().into_owned(), target.to_string_lossy().into_owned())); // target is just a file/directory
             }
         }
         if Path::new(target).is_dir() && (linktype == LinkType::Hardlink) {
-            return Err(QuickLinkCreationError::UnavailableLinkType(source.to_owned(), linktype, FileType::Directory));
+            return Err(QuickLinkCreationError::UnavailableLinkType(source.to_string_lossy().into_owned(), linktype, FileType::Directory));
         }
-        Ok(QuickLink { source: source.to_owned(), target: target.to_owned(), exists: exists, linktype: linktype })
+        Ok(QuickLink { source: source.to_path_buf().canonicalize().unwrap(), target: target.to_path_buf(), exists: exists, linktype: linktype })
     }
-    
+
     /// Create a new QuickLink object, without linking it.
     /// Supports importing an existing softlink, provided the target file is already one pointing exactly to the source.
-    pub fn new_autolink(source: &str, target: &str, linktype: LinkType) -> Result<QuickLink, QuickLinkCreationError> {
-        let source_file = Path::new(source);
-        if !source_file.exists() {
-            return Err(QuickLinkCreationError::SourceDoesNotExist(source.to_owned()));
-        }
-        let target_file = Path::new(target);
-        let mut exists = false;
-        if target_file.exists() { // Check if it is a link, if it has correct type, abort if it is
-            if linktype == LinkType::Softlink && target_file.is_symlink() {
-                if read_link(target).unwrap().as_path() != source_file { // softlink exists, but source is different.
-                    return Err(QuickLinkCreationError::TargetLinkHasDifferentSource(source.to_owned(), target.to_owned(), read_link(target).unwrap().as_path().to_string_lossy().to_string()))
-                } else {
-                    exists = true;
-                }
-            }
-            else if linktype == LinkType::Hardlink {
-                // There might be a way to do it later, for now - always abort, as if it was just a file.
-                return Err(QuickLinkCreationError::TargetExists(source.to_owned(), target.to_owned())); // target is just a file/directory
-            }
-            else {
-                return Err(QuickLinkCreationError::TargetExists(source.to_owned(), target.to_owned())); // target is just a file/directory
-            }
-        }
-        if target_file.is_dir() && linktype == LinkType::Hardlink && !exists {
-            return Err(QuickLinkCreationError::UnavailableLinkType(source.to_owned(), linktype, FileType::Directory));
-        }
-        let mut link = QuickLink { source: source.to_owned(), target: target.to_owned(), exists, linktype: linktype };
-        if !exists {
+    pub fn new_autolink(source: &Path, target: &Path, linktype: LinkType) -> Result<QuickLink, QuickLinkCreationError> {
+        let mut link = QuickLink::new(source, target, linktype)?;
+        if !link.exists {
             link.link()?;
         }
         Ok(link)
@@ -169,7 +156,6 @@ impl QuickLink {
             true => self.unlink()?,
             false => self.link()?,
         }
-        self.exists = !self.exists;
         Ok(())
     }
 
@@ -197,6 +183,12 @@ impl QuickLink {
         std::fs::remove_file(&self.target)?; // links to directories are still just files
         self.exists = false;
         Ok(())
+    }
+}
+
+impl Display for QuickLink {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "{} -> {} , e: {}, t: {}", self.source.to_str().unwrap(), self.target.to_str().unwrap(), self.exists, self.linktype)
     }
 }
 
