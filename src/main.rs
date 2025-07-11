@@ -1,31 +1,82 @@
+// Helper to get absolute path even if file doesn't exist
+fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir().unwrap().join(path)
+    }
+}
 mod database;
+mod cli;
 
-use std::{env, error::Error, fmt::{self, Debug, Display, Formatter}, io, os::unix::fs, path::{Path, PathBuf}, str::FromStr};
+use std::{env, error::Error, fmt::{self, Debug, Display, Formatter}, io, os::unix::fs, path::{Path, PathBuf}};
+use clap::{Parser, ValueEnum};
 use std::fs::read_link;
 use serde::{Deserialize, Serialize};
 
-use crate::database::{LinkStorage};
+use crate::database::LinkStorage;
+use crate::cli::{Cli, Commands};
 
 fn main() -> std::io::Result<()> {
-    let db = LinkStorage::init(&env::current_dir().unwrap().join(Path::new("tmp")));
-    let mut link: QuickLink = QuickLink::new(Path::new("./tmp/file1"), Path::new("./tmp/link1"), LinkType::Softlink).unwrap();
-    let mut link2: QuickLink = QuickLink::new_autolink(Path::new("./tmp/file2"), Path::new("./tmp/link2"), LinkType::Softlink).unwrap();
-    link.toggle_link()?;
-    link2.toggle_link()?;
-    println!("{}", link);
-    println!("{}", link2);
-    db.save_quicklink(&link);
-    db.save_quicklink(&link2);
+    let cli = Cli::parse();
+    let db = LinkStorage::init(&env::current_dir().unwrap());
 
-    let file1_canon = Path::new("./tmp/file1").canonicalize().unwrap();
-    let link1_path = Path::new("./tmp/link1").to_path_buf();
-    println!("loaded: {}", db.get_quicklink(&file1_canon.to_string_lossy(), &link1_path.to_string_lossy()).unwrap());
-
-    println!("All saved links:");
-    for l in db.get_all() {
-        println!("{}", l);
+    match cli.command {
+        Commands::Create { source, target, link_type } => {
+            let abs_source = absolute_path(&source);
+            let abs_target = absolute_path(&target);
+            let already_exists = db.get_quicklink(abs_source.to_str().unwrap(), abs_target.to_str().unwrap()).is_some();
+            if already_exists {
+                eprintln!("A link for source '{}' and target '{}' already exists in the database.", abs_source.display(), abs_target.display());
+                return Ok(());
+            }
+            let quicklink = QuickLink::new(&source, &target, link_type);
+            match quicklink {
+                Ok(mut link) => {
+                    link.link()?;
+                    db.save_quicklink(&link);
+                    println!("Link created: {}", link);
+                },
+                Err(e) => {
+                    eprintln!("Error creating link: {}", e);
+                }
+            }
+        }
+        Commands::Remove { target } => {
+            match db.find_by_target(&target) {
+                Some(mut link) => {
+                    if link.exists {
+                        link.unlink()?;
+                        println!("Link removed: {}", link);
+                    } else {
+                        println!("Link not present in filesystem: {}", link);
+                    }
+                },
+                None => {
+                    eprintln!("No tracked link found for target: {}", target.display());
+                }
+            }
+        }
+        Commands::List => {
+            let links = db.get_all();
+            println!("Tracked links:");
+            for link in links {
+                println!("{}", link);
+            }
+        }
+        Commands::Toggle { target } => {
+            match db.find_by_target(&target) {
+                Some(mut link) => {
+                    link.toggle_link()?;
+                    db.save_quicklink(&link);
+                    println!("Toggled link: {}", link);
+                },
+                None => {
+                    eprintln!("No tracked link found for target: {}", target.display());
+                }
+            }
+        }
     }
-
     Ok(())
 }
 
@@ -75,7 +126,7 @@ impl From<std::io::Error> for QuickLinkCreationError {
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Serialize, Deserialize, Default)]
 enum LinkType {
     #[default]
     Softlink,
@@ -121,28 +172,30 @@ impl QuickLink {
     /// Create a new QuickLink object, without linking it.
     /// Supports importing an existing softlink, provided the target file is already one pointing exactly to the source.
     pub fn new(source: &Path, target: &Path, linktype: LinkType) -> Result<QuickLink, QuickLinkCreationError> {
-        if !source.exists() {
-            return Err(QuickLinkCreationError::SourceDoesNotExist(source.to_string_lossy().into_owned()));
+        let abs_source = absolute_path(source);
+        let abs_target = absolute_path(target);
+        if !abs_source.exists() {
+            return Err(QuickLinkCreationError::SourceDoesNotExist(abs_source.to_string_lossy().into_owned()));
         }
         let mut exists = false;
-        if target.exists() { // Check if it is a link, if it has correct type, abort if it is
+        if abs_target.exists() {
             exists = true;
-            if linktype == LinkType::Softlink && target.is_symlink() {
-                if read_link(target).unwrap().as_path() != source.canonicalize().unwrap() { // softlink exists, but source is different.
-                    return Err(QuickLinkCreationError::TargetLinkHasDifferentSource(source.to_string_lossy().into_owned(), target.to_string_lossy().into_owned(), read_link(target).unwrap().as_path().to_string_lossy().to_string()))
+            if linktype == LinkType::Softlink && abs_target.is_symlink() {
+                if read_link(&abs_target).unwrap().as_path() != abs_source.canonicalize().unwrap() {
+                    return Err(QuickLinkCreationError::TargetLinkHasDifferentSource(abs_source.to_string_lossy().into_owned(), abs_target.to_string_lossy().into_owned(), read_link(&abs_target).unwrap().as_path().to_string_lossy().to_string()))
                 }
             }
             else if linktype == LinkType::Hardlink {
                 // There might be a way to do it later, for now - always abort, as if it was just a file.
             }
             else {
-                return Err(QuickLinkCreationError::TargetExists(source.to_string_lossy().into_owned(), target.to_string_lossy().into_owned())); // target is just a file/directory
+                return Err(QuickLinkCreationError::TargetExists(abs_source.to_string_lossy().into_owned(), abs_target.to_string_lossy().into_owned()));
             }
         }
-        if Path::new(target).is_dir() && (linktype == LinkType::Hardlink) {
-            return Err(QuickLinkCreationError::UnavailableLinkType(source.to_string_lossy().into_owned(), linktype, FileType::Directory));
+        if abs_target.is_dir() && (linktype == LinkType::Hardlink) {
+            return Err(QuickLinkCreationError::UnavailableLinkType(abs_source.to_string_lossy().into_owned(), linktype, FileType::Directory));
         }
-        Ok(QuickLink { source: source.to_path_buf().canonicalize().unwrap(), target: target.to_path_buf(), exists: exists, linktype: linktype })
+        Ok(QuickLink { source: abs_source, target: abs_target, exists, linktype })
     }
 
     /// Create a new QuickLink object, without linking it.

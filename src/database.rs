@@ -1,3 +1,4 @@
+    
 use core::panic;
 use std::{fs::{create_dir, File, OpenOptions}, io::{BufReader, BufWriter, Write}, path::{Path, PathBuf}};
 use blake2::{Blake2b512, Digest};
@@ -47,6 +48,16 @@ impl LinkStorage {
             return Some(resolved_link);
         }
         None
+    }
+
+    /// Get a QuickLink by its target path. Automatically makes the path absolute.
+    pub fn find_by_target(&self, target: &Path) -> Option<QuickLink> {
+        let abs_target = if target.is_absolute() {
+            target.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap().join(target)
+        };
+        self.get_all().into_iter().find(|l| l.target == abs_target)
     }
 
     /// Get all saved QuickLinks as a Vec
