@@ -1,15 +1,12 @@
-#![feature(file_buffered)]
-
 mod database;
 
 use std::{env, error::Error, fmt::{self, Debug, Display, Formatter}, io, os::unix::fs, path::{Path, PathBuf}, str::FromStr};
 use std::fs::read_link;
 use serde::{Deserialize, Serialize};
 
-use crate::database::LinkStorage;
+use crate::database::{LinkStorage};
 
 fn main() -> std::io::Result<()> {
-    // Quick tests in tmp
     let db = LinkStorage::init(&env::current_dir().unwrap().join(Path::new("tmp")));
     let mut link: QuickLink = QuickLink::new(Path::new("./tmp/file1"), Path::new("./tmp/link1"), LinkType::Softlink).unwrap();
     let mut link2: QuickLink = QuickLink::new_autolink(Path::new("./tmp/file2"), Path::new("./tmp/link2"), LinkType::Softlink).unwrap();
@@ -19,8 +16,16 @@ fn main() -> std::io::Result<()> {
     println!("{}", link2);
     db.save_quicklink(&link);
     db.save_quicklink(&link2);
-    println!("loaded: {}", db.get_quicklink("file1").unwrap());
-    
+
+    let file1_canon = Path::new("./tmp/file1").canonicalize().unwrap();
+    let link1_path = Path::new("./tmp/link1").to_path_buf();
+    println!("loaded: {}", db.get_quicklink(&file1_canon.to_string_lossy(), &link1_path.to_string_lossy()).unwrap());
+
+    println!("All saved links:");
+    for l in db.get_all() {
+        println!("{}", l);
+    }
+
     Ok(())
 }
 
